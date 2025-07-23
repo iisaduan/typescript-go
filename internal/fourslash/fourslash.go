@@ -835,6 +835,117 @@ func (f *FourslashTest) VerifyBaselineFindAllReferences(
 	baseline.Run(t, f.baseline.getBaselineFileName(), f.baseline.content.String(), baseline.Options{})
 }
 
+
+func (f *FourslashTest) VerifyBaselineGoToDefs(
+	t *testing.T,
+	subtype string,
+	markers ...string,
+) {
+	// if there are no markers specified, use all ranges
+	var referenceLocations []MarkerOrRange
+	if len(markers) == 0 {
+		referenceLocations = core.Map(f.testData.Ranges, func(r *RangeMarker) MarkerOrRange { return r })
+	} else {
+		referenceLocations = core.Map(markers, func(markerName string) MarkerOrRange {
+			marker, ok := f.testData.MarkerPositions[markerName]
+			if !ok {
+				t.Fatalf("Marker '%s' not found", markerName)
+			}
+			return marker
+		})
+	}
+
+	if f.baseline != nil {
+		t.Fatalf("Error during test '%s': Another baseline is already in progress", t.Name())
+	} else {
+		f.baseline = &baselineFromTest{
+			content:      &strings.Builder{},
+			baselineName: subtype+"/" + strings.TrimPrefix(t.Name(), "Test"),
+			ext:          ".baseline.jsonc",
+		}
+	}
+	// empty baseline after test completes
+	defer func() {
+		f.baseline = nil
+	}()
+
+	var goToDefCommand lsproto.Method
+	var getParams func () any
+	baselineMarkerName := ""
+
+	switch subtype {
+	case "GoToDefinition":
+		goToDefCommand = lsproto.MethodTextDocumentDefinition
+		baselineMarkerName = "/*GOTO DEF*/"
+		getParams = func() any {return &lsproto.DefinitionParams{
+				TextDocumentPositionParams: f.currentTextDocumentPositionParams(),
+		}}
+	case "GetDefinitionAtPosition": 
+		goToDefCommand = lsproto.MethodTextDocumentDefinition
+		baselineMarkerName = "/*GOTO DEF POS*/"
+		getParams = func() any {return &lsproto.DefinitionParams{
+			TextDocumentPositionParams: f.currentTextDocumentPositionParams(),
+		}}
+	case "GoToType" : 
+		goToDefCommand = lsproto.MethodTextDocumentTypeDefinition
+		baselineMarkerName = "/*GOTO TYPE*/"
+		getParams = func() any {return &lsproto.TypeDefinitionParams{
+			TextDocumentPositionParams: f.currentTextDocumentPositionParams(),
+		}}
+	case "GoToImplementation":
+		goToDefCommand = lsproto.MethodTextDocumentImplementation
+		baselineMarkerName = "/*GOTO IMPL*/"
+		getParams = func() any {return &lsproto.ImplementationParams{
+				TextDocumentPositionParams: f.currentTextDocumentPositionParams(),
+		}}
+	case "GoToSourceDefinition":
+		t.Fatalf("GoToSourceDefinition not yet Implemented")
+	default:
+		panic(fmt.Sprintf("Unknown subtype '%s' for VerifyBaselineGoToDefs", subtype))
+	}
+
+
+	for _, markerOrRange := range referenceLocations {
+		f.GoToMarkerOrRange(t, markerOrRange)
+	
+		resMsg := f.sendRequest(t, goToDefCommand, getParams())
+		if resMsg == nil {
+			if f.lastKnownMarkerName == nil {
+				t.Fatalf("Unexpected %s response type at pos %v", subtype, f.currentCaretPosition)
+			} else {
+				t.Fatalf("Nil response received for %s request at marker '%s'", subtype, *f.lastKnownMarkerName)
+			}
+		}
+		result := resMsg.AsResponse().Result
+		locations := []*lsproto.Location{}
+		switch result := result.(type) {
+		case []*lsproto.Location:
+			locations = result
+		case *lsproto.Location:
+			locations = []*lsproto.Location{result}
+		case lsproto.LocationOrLocations:
+			if result.Locations != nil && len(*result.Locations) != 0 {
+				for _, loc := range *result.Locations {
+					locations = append(locations, &loc)
+				}
+			}
+			if result.Location != nil {
+				locations = append(locations, result.Location)
+			}
+		default:
+		}
+		f.baseline.addResult(subtype, f.getBaselineForLocationsWithFileContents(locations, baselineFourslashLocationsOptions{
+			marker:     markerOrRange.GetMarker(),
+			markerName: baselineMarkerName,
+		}))
+		
+	}
+
+	baseline.Run(t, f.baseline.getBaselineFileName(), f.baseline.content.String(), baseline.Options{})
+}
+
+
+
 func ptrTo[T any](v T) *T {
 	return &v
 }
